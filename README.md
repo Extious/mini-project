@@ -1,74 +1,85 @@
-# GPU Inference Parallelism Mini-Project
+# GPU Language Model Inference Mini-Project
 
 ## Overview
-This mini-project targets optimizing deep learning inference workloads on GPUs. It demonstrates how to:
-- Benchmark single-GPU, batched, and multi-GPU inference pipelines.
-- Apply practical optimization levers such as mixed precision, CUDA graph capture, and asynchronous data loading.
-- Scale runs on a cluster with SLURM using a torchrun-based launcher.
-- Capture performance telemetry for later analysis and reporting.
+- Target workload: Hugging Face causal language models (e.g., `distilgpt2`, `gpt2`, `gpt2-medium`) under multi-GPU inference.
+- Parallel strategies: sequential micro-batching, large-batch single GPU, `torch.nn.DataParallel`, and `torchrun`-based DistributedDataParallel.
+- Performance levers: mixed precision, CUDA graph capture (single-rank), prompt batching, and `torch.profiler` guided tuning.
+- Outputs: JSON metrics (samples/s, tokens/s, latency stats), optional TensorBoard traces, and a structured report template.
 
 ## Repository Layout
-- `src/`: Core Python modules for data preparation, model loading, inference pipelines, and performance accounting.
-- `scripts/`: Convenience shell scripts to replicate benchmark sweeps.
-- `slurm/`: Example SLURM submission scripts for cluster execution.
-- `report/`: Markdown template capturing the full project report, including background, methodology, and results tables.
-- `data/`: Placeholder directory for cached datasets or exported metrics.
+- `src/`: Python package for dataset synthesis, Hugging Face model loading, execution loop, and profiling utilities.
+- `scripts/`: Ready-to-run shell scripts for baseline sweeps and profiler demonstrations.
+- `slurm/`: Example SLURM submission script using `torchrun` on multi-GPU nodes.
+- `report/`: Markdown report template plus artifact directory for plots/traces.
+- `data/`: Cache for downloaded tokenizers/models, metrics JSON, and profiler outputs (ignored by git).
 
-## Quickstart
-1. **Create a virtual environment**
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install --upgrade pip
-   ```
-2. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. **Verify GPU availability (optional)**
-   ```bash
-   python - <<'PY'
-   import torch
-   print(torch.cuda.is_available())
-   print(torch.cuda.device_count())
-   PY
-   ```
-
-## Running Benchmarks
-All experiments are driven by `python -m src.cli`. Key arguments:
-- `--model`: Backbone to load (`resnet50`, `efficientnet_b0`, `vit_b_16`).
-- `--dataset`: `synthetic` (random tensors) or `cifar10`.
-- `--mode`: `sequential`, `batched`, `dataparallel`, or `distributed`.
-- `--batch-size`: Micro-batch per device.
-- `--num-samples`: Total samples to process for the run.
-- `--precision`: `fp32`, `fp16`, or `bf16`.
-- `--capture-graph`: Enable CUDA graph replay to reduce launch overhead.
-
-### Examples
+## Environment Setup
 ```bash
-# Baseline single-GPU FP32 run
-python -m src.cli --model resnet50 --dataset synthetic --mode sequential --batch-size 32 --num-samples 2048
-
-# DataParallel across all visible GPUs with mixed precision
-python -m src.cli --model resnet50 --dataset cifar10 --mode dataparallel --batch-size 128 --precision fp16
-
-# Distributed execution (2 GPUs) using torchrun
-torchrun --nproc_per_node=2 -m src.cli --model vit_b_16 --mode distributed --dataset synthetic --num-samples 4096
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-## SLURM Usage
-The `slurm/run_inference.sbatch` script illustrates:
-- Module/environment setup.
-- Resource requests for multi-GPU nodes.
-- Launching `torchrun` with node-local ranks and aggregated metrics.
+Verify GPU visibility:
+```bash
+python - <<'PY'
+import torch
+print("cuda?", torch.cuda.is_available())
+print("gpus", torch.cuda.device_count())
+PY
+```
 
-Adapt node counts, partition names, and paths to your cluster.
+## Running Benchmarks
+All experiments use `python -m src.cli` with the following key arguments:
+- `--model`: `distilgpt2`, `gpt2`, or `gpt2-medium`.
+- `--dataset`: `synthetic` (randomized prompt permutations) or `curated` (fixed research prompts).
+- `--mode`: `sequential`, `batched`, `dataparallel`, or `distributed`.
+- `--batch-size`: Prompts per step; sequential mode automatically micro-batches to size 1.
+- `--max-length`: Prompt token length after padding (default 256).
+- `--precision`: `fp32`, `fp16`, or `bf16`.
+- `--profile`: Enable `torch.profiler`; combine with `--profile-dir` for TensorBoard traces.
+
+### Example commands
+```bash
+# Single-GPU latency baseline (prefill only)
+python -m src.cli --model distilgpt2 --dataset synthetic --mode sequential --batch-size 8 --num-samples 256
+
+# Batched throughput with fp16
+python -m src.cli --model distilgpt2 --dataset curated --mode batched --batch-size 64 --precision fp16 --max-length 512 --num-samples 1024
+
+# Two-GPU DDP run with profiling enabled
+torchrun --nproc_per_node=2 -m src.cli \
+  --model gpt2 \
+  --dataset synthetic \
+  --mode distributed \
+  --batch-size 64 \
+  --precision fp16 \
+  --profile \
+  --profile-dir data/profiler/ddp \
+  --metrics-path data/ddp_fp16.json
+```
+
+## Torch Profiler Workflow
+`src.cli` exposes three knobs:
+- `--profile`: turn profiling on (disabled by default).
+- `--profile-dir`: optional TensorBoard log directory (`data/profiler/...` recommended).
+- `--profile-wait`, `--profile-warmup`, `--profile-active`: schedule tuning for steady-state capture.
+
+Launch TensorBoard after a profiled run:
+```bash
+tensorboard --logdir data/profiler --bind_all
+```
+
+## SLURM Execution
+`slurm/run_inference.sbatch` demonstrates:
+- Module/env activation (conda + CUDA).
+- Resource requests for one node with four GPUs.
+- `torchrun` launch plus profiler directory selection.
+
+Customize partition, account, `module load` statements, and storage paths to match your cluster. Remember the course policy: compile LaTeX reports with `xelatex`.
 
 ## Reporting
-Populate `report/report.md` once experiments finish. Document:
-- Problem definition and datasets.
-- Parallel strategy (e.g., DataParallel vs. DistributedDataParallel) and optimization toggles.
-- Hardware configurations tried and their outcomes.
-- Tables/plots summarizing throughput, latency, utilization, and scaling behavior.
-
-Add screenshots or profiler exports under `report/artifacts/` if needed.
+- Fill `report/report.md` with background, experimental matrix, profiler screenshots, and tables of throughput vs. hardware.
+- Place large assets (TensorBoard screenshots, Nsight traces) under `report/artifacts/`.
+- Keep raw metrics JSON (from `--metrics-path`) under `data/` for reproducibility.

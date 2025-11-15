@@ -1,86 +1,86 @@
 import math
-from dataclasses import dataclass
-from typing import Optional, Tuple
+import random
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Optional
 
-import torch
 from torch.utils.data import DataLoader, Dataset, Subset
+from transformers import PreTrainedTokenizerBase
 
-try:
-    from torchvision import datasets, transforms
-except ImportError:  # pragma: no cover - torchvision might be missing on cpu-only envs
-    datasets = None
-    transforms = None
+
+DEFAULT_PROMPTS: List[str] = [
+    "Summarize the following research abstract in one sentence.",
+    "Generate a concise title for a paper about reinforcement learning with transformers.",
+    "Explain how rotary positional embeddings impact autoregressive decoding.",
+    "Outline the steps required to fine-tune a causal language model on legal documents.",
+    "Compare tensor parallelism and pipeline parallelism for large language model inference.",
+    "Provide three risks associated with deploying conversational agents in healthcare.",
+    "Describe how key-value caching accelerates autoregressive decoding.",
+    "List optimization strategies for batching multilingual prompts on GPUs.",
+    "Predict how quantization-aware training influences downstream accuracy.",
+    "Suggest an evaluation plan for latency-sensitive dialogue models.",
+]
 
 
 @dataclass
 class DataConfig:
     dataset: str = "synthetic"
-    batch_size: int = 32
-    num_samples: int = 2048
-    num_workers: int = 4
+    batch_size: int = 8
+    num_samples: int = 512
+    num_workers: int = 2
     pin_memory: bool = True
     persistent_workers: bool = True
     seed: int = 42
-    image_size: Tuple[int, int, int] = (3, 224, 224)
-    num_classes: int = 1000
+    max_length: int = 256
+    prompt_file: Optional[str] = None
+    prompts: List[str] = field(default_factory=list)
 
 
-class SyntheticImageDataset(Dataset):
-    """Synthetic dataset that mimics ImageNet-sized tensors."""
+class PromptDataset(Dataset):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, config: DataConfig) -> None:
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        self.tokenizer = tokenizer
+        self.config = config
+        self.prompts = self._materialize_prompts(config)
 
-    def __init__(
-        self,
-        num_samples: int,
-        image_size: Tuple[int, int, int],
-        num_classes: int,
-        seed: int = 42,
-    ) -> None:
-        self.num_samples = num_samples
-        self.image_size = image_size
-        self.num_classes = num_classes
-        g = torch.Generator()
-        g.manual_seed(seed)
-        self.data = torch.randn((num_samples, *image_size), generator=g)
-        self.targets = torch.randint(0, num_classes, (num_samples,), generator=g)
+    def _materialize_prompts(self, config: DataConfig) -> List[str]:
+        source: List[str] = []
+        if config.prompt_file:
+            path = Path(config.prompt_file)
+            if path.exists():
+                source = [line.strip() for line in path.read_text().splitlines() if line.strip()]
+        if not source:
+            source = config.prompts or DEFAULT_PROMPTS
+        rng = random.Random(config.seed)
+        prompts: List[str] = []
+        while len(prompts) < config.num_samples:
+            base = rng.choice(source)
+            if config.dataset == "synthetic":
+                suffix = rng.randint(0, 10**6)
+                prompts.append(f"{base} #{suffix}")
+            else:
+                prompts.append(base)
+        return prompts[: config.num_samples]
 
     def __len__(self) -> int:
-        return self.num_samples
+        return len(self.prompts)
 
     def __getitem__(self, index: int):
-        return self.data[index], self.targets[index]
-
-
-def _build_cifar10_dataset(num_samples: int) -> Dataset:
-    if datasets is None or transforms is None:
-        raise RuntimeError("torchvision is required for CIFAR10 dataset")
-
-    transform = transforms.Compose(
-        [
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=(0.485, 0.456, 0.406),
-                std=(0.229, 0.224, 0.225),
-            ),
-        ]
-    )
-    dataset = datasets.CIFAR10(root="data", train=False, download=True, transform=transform)
-    if num_samples < len(dataset):
-        dataset = Subset(dataset, torch.arange(num_samples))
-    return dataset
-
-
-def build_dataset(config: DataConfig) -> Dataset:
-    if config.dataset == "synthetic":
-        return SyntheticImageDataset(
-            num_samples=config.num_samples,
-            image_size=config.image_size,
-            num_classes=config.num_classes,
-            seed=config.seed,
+        encoded = self.tokenizer(
+            self.prompts[index],
+            max_length=self.config.max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
         )
-    if config.dataset == "cifar10":
-        return _build_cifar10_dataset(config.num_samples)
-    raise ValueError(f"Unknown dataset '{config.dataset}'")
+        return {key: value.squeeze(0) for key, value in encoded.items()}
+
+
+def build_dataset(config: DataConfig, tokenizer: PreTrainedTokenizerBase) -> Dataset:
+    if config.dataset not in {"synthetic", "curated"}:
+        raise ValueError(f"Unknown dataset '{config.dataset}'")
+    return PromptDataset(tokenizer=tokenizer, config=config)
 
 
 def shard_dataset(dataset: Dataset, world_size: int, rank: int) -> Dataset:
@@ -89,12 +89,16 @@ def shard_dataset(dataset: Dataset, world_size: int, rank: int) -> Dataset:
     shard_size = math.ceil(len(dataset) / world_size)
     start = rank * shard_size
     end = min((rank + 1) * shard_size, len(dataset))
-    indices = torch.arange(start, end)
+    indices = list(range(start, end))
     return Subset(dataset, indices)
 
 
-def build_dataloader(config: DataConfig, dataset: Optional[Dataset] = None) -> DataLoader:
-    dataset = dataset or build_dataset(config)
+def build_dataloader(
+    config: DataConfig,
+    dataset: Optional[Dataset] = None,
+) -> DataLoader:
+    if dataset is None:
+        raise ValueError("Dataset must be provided when using language model workloads.")
     return DataLoader(
         dataset,
         batch_size=config.batch_size,

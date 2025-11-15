@@ -17,11 +17,13 @@ cd $SLURM_SUBMIT_DIR
 
 torchrun --nnodes=${SLURM_NNODES} --nproc_per_node=${SLURM_GPUS_PER_NODE} \
   -m src.cli \
-  --model resnet50 \
+  --model gpt2 \
   --dataset synthetic \
   --mode distributed \
-  --batch-size 128 \
-  --num-samples 16384 \
+  --batch-size 96 \
+  --num-samples 4096 \
   --precision fp16 \
-  --capture-graph \
+  --max-length 512 \
+  --profile \
+  --profile-dir data/profiler/slurm_ddp \
   --metrics-path data/slurm_distributed.json

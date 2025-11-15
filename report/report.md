@@ -1,49 +1,50 @@
-# GPU Inference Parallelization Report
+# GPU LLM Inference Report Template
 
 ## 1. Problem Definition
-- **Research goal:** Reduce latency and improve throughput of pretrained vision models during batch inference on GPU clusters.
-- **Baseline workload:** Torchvision `resnet50` evaluated on synthetic ImageNet-sized tensors (optionally CIFAR10) with 2,048 samples.
-- **Metrics:** Samples per second (throughput), mean latency per batch, GPU memory footprint.
+- **Research focus:** Accelerating autoregressive language model inference for interactive assistants running on multi-GPU clusters.
+- **Models:** Hugging Face `distilgpt2`, `gpt2`, `gpt2-medium`.
+- **Workload:** Prompt prefill only (no generation) over 256–512 token sequences, comparing sequential vs. batched vs. multi-GPU execution.
+- **Metrics:** Samples per second, tokens per second, batch latency (avg/p95), max GPU memory, profiler-derived hotspots.
 
-## 2. System Design
-- **Data pipeline:** Configurable datasets via `src/data.py` with synthetic tensors or CIFAR10; deterministic sharding for distributed ranks.
-- **Model stack:** Torchvision backbones (`resnet50`, `efficientnet_b0`, `vit_b_16`) loaded through `src/model_loader.py`, with optional TorchScript tracing.
-- **Execution modes:** Sequential, batched, `torch.nn.DataParallel`, and DistributedDataParallel (torchrun) plus optional CUDA graph capture.
-- **Optimization levers:** Mixed precision (`fp16`, `bf16`), CUDA graph replay, warm-up trimming, asynchronous DataLoader workers, SLURM job orchestration.
+## 2. System Architecture
+- **Data pipeline (`src/data.py`):** Synthetic or curated prompts padded to a fixed `max_length`, deterministic sharding per rank.
+- **Execution driver (`src/cli.py`):** CLI toggles for precision, CUDA graphs, DistributedDataParallel, and `torch.profiler` schedule.
+- **Profiling (`src/profiler.py`):** Collects latency summaries and optional TensorBoard traces (CPU+CUDA activities, stack traces, memory).
+- **Automation:** `scripts/benchmark.sh` for local sweeps; `slurm/run_inference.sbatch` for cluster jobs with profiler outputs.
 
-## 3. Implementation Summary
-- `src/cli.py` serves as the experiment driver with CLI flags for all toggles.
-- `scripts/benchmark.sh` showcases a reproducible sweep (sequential vs batched vs distributed).
-- `slurm/run_inference.sbatch` enables cluster submission with four GPUs per node.
-- Metrics persist to JSON (`--metrics-path`) for downstream visualization (e.g., pandas, matplotlib).
+## 3. Experiment Matrix (example)
+| Run ID | Model | Mode | GPUs | Batch | Precision | Max Length | Profile? | Notes |
+|--------|-------|------|------|-------|-----------|------------|----------|-------|
+| seq-fp32 | distilgpt2 | sequential | 1 | 8 | fp32 | 256 | no | Latency baseline |
+| batched-fp16 | distilgpt2 | batched | 1 | 64 | fp16 | 512 | no | Throughput focus |
+| dp-fp16 | gpt2 | dataparallel | 4 | 64 | fp16 | 256 | no | Scale-up with NCCL |
+| ddp-prof | gpt2-medium | distributed | 4 | 96 | fp16 | 512 | yes | Trace analysis |
 
-## 4. Experiment Plan
-| Run ID | Mode | GPUs | Batch Size | Precision | CUDA Graph | Notes |
-|--------|------|------|------------|-----------|------------|-------|
-| baseline | sequential | 1 | 32 | fp32 | off | Reference latency. |
-| batched | batched | 1 | 256 | fp16 | off | Demonstrates batching gains + mixed precision. |
-| dp | dataparallel | 4 | 128 | fp16 | off | Highlights multi-GPU data parallel scaling. |
-| ddp-graph | distributed | 4 | 128 | fp16 | on | Uses torchrun + CUDA graphs to cut launch overhead. |
+## 4. Results Table (fill with actual numbers)
+| Run ID | Samples/s | Tokens/s | Avg Latency (s) | P95 Latency (s) | Max GPU Mem (MB) |
+|--------|-----------|----------|-----------------|-----------------|------------------|
+| seq-fp32 | TBD | TBD | TBD | TBD | TBD |
+| batched-fp16 | TBD | TBD | TBD | TBD | TBD |
+| dp-fp16 | TBD | TBD | TBD | TBD | TBD |
+| ddp-prof | TBD | TBD | TBD | TBD | TBD |
 
-## 5. Sample Results (fill with real data)
-| Run ID | Samples/s | Avg Latency (s) | P95 Latency (s) | Max GPU Memory (MB) |
-|--------|-----------|-----------------|-----------------|---------------------|
-| baseline | TBD | TBD | TBD | TBD |
-| batched | TBD | TBD | TBD | TBD |
-| dp | TBD | TBD | TBD | TBD |
-| ddp-graph | TBD | TBD | TBD | TBD |
+Store supporting JSON metrics under `data/` (same names as `Run ID`) for reproducibility.
 
-Add profiler screenshots or Nsight timelines to `report/artifacts/`.
+## 5. Profiler Findings
+1. Attach TensorBoard screenshots (`report/artifacts/`) showing kernel time distribution and memory usage.
+2. Summarize key bottlenecks (e.g., attention kernels, embedding lookups, NCCL all-reduce).
+3. Link optimizations to evidence (e.g., CUDA graph reduced launch overhead by X% according to profiler traces).
 
-## 6. Analysis Template
-1. Compare throughput scaling efficiency between single GPU and DDP runs.
-2. Quantify benefits of mixed precision on both throughput and memory.
-3. Discuss CUDA graph capture impacts on small batch scenarios.
-4. Identify remaining bottlenecks (data loading, kernel launch, comms) and propose next steps (e.g., TensorRT conversion, pipeline parallelism).
+## 6. Analysis Checklist
+- Compare scaling efficiency: `(tokens/s) / (#GPUs)` across sequential, batched, DDP runs.
+- Quantify precision impact: fp32 vs. fp16 throughput, latency, and memory.
+- Evaluate CUDA graph benefits for steady micro-batches.
+- Identify remaining issues (tokenizer speed, DataLoader overhead, communication hotspots) and propose next steps (KV cache reuse, tensor parallelism, quantization).
 
-## 7. Reproducibility Checklist
-- [ ] Python environment recreated via `requirements.txt`.
-- [ ] Dataset availability documented.
-- [ ] CLI commands (or SLURM scripts) recorded for each result row.
-- [ ] Metrics JSON artifacts versioned under `data/`.
-- [ ] Random seeds logged (`--seed` flag).
+## 7. Reproducibility
+- [ ] Record exact CLI invocations (or SLURM scripts) for every table entry.
+- [ ] Track environment info (PyTorch, transformers, CUDA, driver).
+- [ ] Preserve raw profiler directories (`data/profiler/...`) and mention how to open them with TensorBoard.
+- [ ] Document random seeds and prompt sources.
+
+> Reminder: compile the final PDF with `xelatex` per course policy.
